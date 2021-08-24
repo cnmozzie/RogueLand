@@ -79,6 +79,8 @@ contract RogueLand {
   
     // 储存时空信息
     mapping (uint => mapping (int => mapping (int => Event))) public events;
+
+    event ActionCommitted(uint indexed punkId, uint indexed time, ActionChoices action);
   
     constructor(address nftAddress_) {
         owner = msg.sender;
@@ -95,6 +97,9 @@ contract RogueLand {
             selectEvents[i] = events[t][x][y];
             if (events[t][x][y].movingPunk == 0 && stillPunks[stillPunkOn[x][y]].showtime <= t) {
               selectEvents[i].movingPunk = stillPunkOn[x][y];
+            }
+            if (goldOn[x][y].vaildTime == 0 || goldOn[x][y].vaildTime >= t) {
+              selectEvents[i].monster = goldOn[x][y].amount;
             }
             i ++;
           }
@@ -250,6 +255,7 @@ contract RogueLand {
           _addStillPunk(id, x+1, y-1, t+1);
         }
         lastScheduleOf[id] ++;
+        emit ActionCommitted(id, lastScheduleOf[id], action);
     }
 
     function getCurrentTime() public view returns (uint) {
