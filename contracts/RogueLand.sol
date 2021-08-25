@@ -130,7 +130,7 @@ contract RogueLand {
         require(msg.sender == owner, "Only admin can put gold.");
         goldOn[x][y].vaildTime = 0;
         goldOn[x][y].punkNumber = 0;
-        goldOn[x][y].amount = amount;
+        goldOn[x][y].amount += amount;
     }
 
     // 获取金币
@@ -154,8 +154,11 @@ contract RogueLand {
     }
 
     function getEvent(uint id) public view returns (StatusInfo memory) {
+      if (lastScheduleOf[id] == 0) {
+        return StatusInfo(0, 0, 0);
+      }
       uint time = getCurrentTime();
-      uint start = time > 150? time-150: 0;
+      uint start = time > 150? time-150: 1;
       uint end = time < lastScheduleOf[id]-1? time: lastScheduleOf[id]-1;
       for (uint t=start; t<=end; t++) {
         int x_ = movingPunks[id][t].x;
@@ -198,7 +201,7 @@ contract RogueLand {
           stillPunks[latestNeighbor].oldNeighbor = id;
         }
         // 自动拾取金币
-        if (goldOn[x][y].vaildTime == 0 || goldOn[x][y].vaildTime >= t) {
+        if (goldOn[x][y].amount > 0 && (goldOn[x][y].vaildTime == 0 || goldOn[x][y].vaildTime >= t)) {
           if (goldOn[x][y].vaildTime == t) {
             goldOn[x][y].punkNumber ++;
           }
