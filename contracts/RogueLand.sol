@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;
 
-import "@openzeppelin/contracts/token/ERC721/extensions/IERC721Metadata.sol";
-
 contract RogueLand {
     
     enum ActionChoices { SitStill, GoLeft, GoRight, GoUp, GoDown, GoLeftUp, GoLeftDown, GoRightUp, GoRightDown }
@@ -16,12 +14,6 @@ contract RogueLand {
       uint amount;
       uint vaildTime;
       uint punkNumber;
-    }
-  
-    struct Authorizer {
-      uint id;
-      string name;
-      address holder;
     }
 
     struct PlayerInfo {
@@ -53,14 +45,18 @@ contract RogueLand {
     }
 
     address public owner;
-    address public nftAddress;
 
     uint private _startBlock; // 记录初始区块数
+    uint private _randNonce;
+    uint public mapSize = 5;
     uint public activeRound = 150;
     uint public blockPerRound = 500;
+    uint public goldInterval = 500;
+    uint public goldAmount = 10000;
+    uint public validBlockToPutGold;
   
     // 储存玩家授权信息
-    mapping (address => Authorizer) public authorizerOf;
+    mapping (address => PlayerInfo) public playerInfo;
 
     // 储存punk的时空信息
     mapping (uint => mapping (uint => MovingPunk)) public movingPunks;
@@ -81,12 +77,20 @@ contract RogueLand {
     mapping (uint => mapping (int => mapping (int => Event))) public events;
 
     event ActionCommitted(uint indexed punkId, uint indexed time, ActionChoices action);
+    event GoldPicked(uint indexed punkId, uint indexed time, int x, int y, uint amount);
+    event GoldPut(uint indexed punkId, int x, int y, uint amount, bool isPut);
   
-    constructor(address nftAddress_) {
+    constructor() {
         owner = msg.sender;
-        nftAddress = nftAddress_;
         _startBlock = block.number;
+        validBlockToPutGold = block.number;
     }
+
+    // Function to receive Ether. msg.data must be empty
+    receive() external payable {}
+
+    // Fallback function is called when msg.data is not empty
+    fallback() external payable {}
 
     function getEvents(int x1, int y1, int x2, int y2, uint t) public view returns (Event[] memory) {
         require(x2 >= x1 && y2 >= y1, "Invalid index");
@@ -108,14 +112,14 @@ contract RogueLand {
     }
 
     // 授权其它玩家使用punk进行游戏
-    function authorize(address player_, uint id_, string memory name_) public {
-        IERC721Metadata nft = IERC721Metadata(nftAddress);
-        require(msg.sender == nft.ownerOf(id_), "Only owner can authorize his punk!");
-        authorizerOf[player_] = Authorizer(id_, name_, msg.sender);
+    function authorize(address payable player_, uint id_, string memory name_, string memory uri_) public {
+        require(msg.sender == owner, "Only admin can authorize his punk!");
+        playerInfo[player_] = PlayerInfo(id_, name_, uri_);
         if (lastScheduleOf[id_] == 0) {
           uint t = getCurrentTime();
           lastScheduleOf[id_] = t;
           _addStillPunk(id_, 0, 0, t);
+          require(player_.send(1e16), "okt transfer failed");
         }
     }
 
@@ -124,29 +128,59 @@ contract RogueLand {
       return stillPunkOn[x][y] == 0 && events[time][x][y].movingPunk == 0 && (goldOn[x][y].vaildTime == 0 || time > goldOn[x][y].vaildTime + activeRound);
     }
 
-    // 放置金币
-    function putGold(int x, int y, uint amount) public {
-        require(isValidToPutGold(x, y), "This place already had some gold.");
+    // 兑换OKT
+    function swapGold(address payable player_) public {
+        require(player_ == msg.sender, "Please use your gold.");
+        require(stillPunks[playerInfo[player_].id].gold >= 1000, "Lack gold.");
+        stillPunks[playerInfo[player_].id].gold -= 1000;
+        require(player_.send(1e16), "okt transfer failed");
+    }
+
+    // 设置金币参数
+    function setGold(uint goldInterval_, uint goldAmount_) public {
         require(msg.sender == owner, "Only admin can put gold.");
-        goldOn[x][y].vaildTime = 0;
-        goldOn[x][y].punkNumber = 0;
-        goldOn[x][y].amount += amount;
+        goldInterval = goldInterval_;
+        goldAmount = goldAmount_;
+    }
+
+    // 放置金币
+    function putGold() public {
+        require(block.number >= validBlockToPutGold, "Wait, the gold need some time to mint...");
+        _randNonce = uint(keccak256(abi.encode(block.timestamp, msg.sender, _randNonce)));
+        int x = int(_randNonce % (2*mapSize+1)) - int(mapSize);
+        _randNonce = uint(keccak256(abi.encode(block.timestamp, msg.sender, _randNonce)));
+        int y = int(_randNonce % (2*mapSize+1)) - int(mapSize);
+        if (isValidToPutGold(x, y)) {
+          goldOn[x][y].vaildTime = 0;
+          goldOn[x][y].punkNumber = 0;
+          goldOn[x][y].amount += goldAmount;
+          validBlockToPutGold = block.number + goldInterval;
+          emit GoldPut(playerInfo[msg.sender].id, x, y, goldAmount, true);
+        }
+        else {
+          mapSize ++;
+          emit GoldPut(0, 0, 0, 0, false);
+        }
+        stillPunks[playerInfo[msg.sender].id].gold += 100;
     }
 
     // 获取金币
     function getGold(int x, int y) public {
         require(goldOn[x][y].punkNumber > 0 , "Nothing to do.");
         uint t = goldOn[x][y].vaildTime;
-        require(getCurrentTime() >= t, "Wait, it's not the time.");
+        require(getCurrentTime() >= t, "Wait, it is not the time.");
         uint id = stillPunkOn[x][y];
+        uint amount = goldOn[x][y].amount / goldOn[x][y].punkNumber;
         while (id != 0) {
-          stillPunks[id].gold += goldOn[x][y].amount / goldOn[x][y].punkNumber;
+          stillPunks[id].gold += amount;
           id = stillPunks[id].newNeighbor;
+          emit GoldPicked(id, t, x, y, amount);
         }
         id = events[t][x][y].movingPunk;
         while (id != 0) {
-          stillPunks[id].gold += goldOn[x][y].amount / goldOn[x][y].punkNumber;
+          stillPunks[id].gold += amount;
           id = movingPunks[id][t].newNeighbor;
+          emit GoldPicked(id, t, x, y, amount);
         }
         goldOn[x][y].vaildTime = 0;
         goldOn[x][y].punkNumber = 0;
@@ -167,10 +201,12 @@ contract RogueLand {
           return StatusInfo(t, x_, y_);
         }
       }
-      int x = stillPunks[id].x;
-      int y = stillPunks[id].y;
-      if (goldOn[x][y].vaildTime == lastScheduleOf[id]) {
-        return StatusInfo(lastScheduleOf[id], x, y);
+      if (lastScheduleOf[id] <= time) {
+        int x = stillPunks[id].x;
+        int y = stillPunks[id].y;
+        if (goldOn[x][y].vaildTime == lastScheduleOf[id]) {
+          return StatusInfo(lastScheduleOf[id], x, y);
+        }
       }
       return StatusInfo(0, 0, 0);
     }
@@ -222,7 +258,7 @@ contract RogueLand {
 
     // 操作punk
     function scheduleAction(uint id, ActionChoices action) public {
-        require(authorizerOf[msg.sender].id == id, "Get authorized first!");
+        require(playerInfo[msg.sender].id == id, "Get authorized first!");
         uint currentTime = getCurrentTime();
         if (lastScheduleOf[id] < currentTime) {
           lastScheduleOf[id] = currentTime;
@@ -285,23 +321,16 @@ contract RogueLand {
       return StatusInfo(time, stillPunks[id].x, stillPunks[id].y);
     }
 
-    function getAuthorizedId(address player_) public view returns (uint) {
-      IERC721 nft = IERC721(nftAddress);
-      if (authorizerOf[player_].holder == address(0) || authorizerOf[player_].holder != nft.ownerOf(authorizerOf[player_].id)) {
-        return 0;
-      }
-      else {
-        return authorizerOf[player_].id;
-      }
+    function getPlayerInfo(address player_) public view returns (PlayerInfo memory) {
+      return playerInfo[player_];
     }
 
-    function getPlayerInfo(address player_) public view returns (PlayerInfo memory) {
-      require (getAuthorizedId(player_) > 0, "not authorized");
-      IERC721Metadata nft = IERC721Metadata(nftAddress);
-      uint id = authorizerOf[player_].id;
-      string memory name = authorizerOf[player_].name;
-      string memory uri = nft.tokenURI(id);
-      return PlayerInfo(id, name, uri);
+    function getGoldsofAllPunk() public view returns (uint[667] memory) {
+      uint[667] memory golds;
+      for (uint i=0; i<667; i++) {
+        golds[i] = stillPunks[i+1].gold;
+      }
+      return golds;
     }
 
 }
