@@ -87,6 +87,20 @@ module.exports = {
       timeoutBlocks: 200,
       skipDryRun: true
     },
+	oec_test: {
+      provider: () => new HDWalletProvider(mnemonic, `https://exchaintestrpc.okex.org`),
+      network_id: 65,
+      confirmations: 10,
+      timeoutBlocks: 200,
+      skipDryRun: true
+    },
+    oec: {
+      provider: () => new HDWalletProvider(mnemonic, `https://exchainrpc.okex.org`),
+      network_id: 66,
+      confirmations: 10,
+      timeoutBlocks: 200,
+      skipDryRun: true
+    },
     // Another network with more advanced options...
     // advanced: {
     // port: 8777,             // Custom port

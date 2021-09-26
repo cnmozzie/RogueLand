@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;
 
+import "./register.sol";
+
 contract RogueLand {
     
     enum ActionChoices { SitStill, GoLeft, GoRight, GoUp, GoDown, GoLeftUp, GoLeftDown, GoRightUp, GoRightDown }
@@ -14,12 +16,6 @@ contract RogueLand {
       uint amount;
       uint vaildTime;
       uint punkNumber;
-    }
-
-    struct PlayerInfo {
-      uint id;
-      string name;
-      string uri;
     }
 
     struct StatusInfo {
@@ -45,8 +41,9 @@ contract RogueLand {
     }
 
     address public owner;
-
-    uint private _startBlock; // 记录初始区块数
+    address public registerContractAddress;
+    uint public startBlock; // 记录初始区块数
+    uint public endRound; // 记录结束的回合
     uint private _randNonce;
     uint public mapSize = 5;
     uint public activeRound = 150;
@@ -54,9 +51,14 @@ contract RogueLand {
     uint public goldInterval = 500;
     uint public goldAmount = 10000;
     uint public validBlockToPutGold;
+    uint public freePunk = 2;
+    uint public lowbAmount;
+    uint public umgAmount;
   
     // 储存玩家授权信息
-    mapping (address => PlayerInfo) public playerInfo;
+    mapping (uint => address) public punkMaster;
+    mapping (address => uint) public punkOf;
+    mapping (address => bool) public isVIP;
 
     // 储存punk的时空信息
     mapping (uint => mapping (uint => MovingPunk)) public movingPunks;
@@ -76,14 +78,16 @@ contract RogueLand {
     // 储存时空信息
     mapping (uint => mapping (int => mapping (int => Event))) public events;
 
+    // 储存奖励信息
+    mapping (address => bool) public claimed;
+
     event ActionCommitted(uint indexed punkId, uint indexed time, ActionChoices action);
     event GoldPicked(uint indexed punkId, uint indexed time, int x, int y, uint amount);
     event GoldPut(uint indexed punkId, int x, int y, uint amount, bool isPut);
   
-    constructor() {
+    constructor(address registerContractAddress_) {
         owner = msg.sender;
-        _startBlock = block.number;
-        validBlockToPutGold = block.number;
+        registerContractAddress = registerContractAddress_;
     }
 
     // Function to receive Ether. msg.data must be empty
@@ -111,15 +115,27 @@ contract RogueLand {
         return selectEvents;
     }
 
-    // 授权其它玩家使用punk进行游戏
-    function authorize(address payable player_, uint id_, string memory name_, string memory uri_) public {
-        require(msg.sender == owner, "Only admin can authorize his punk!");
-        playerInfo[player_] = PlayerInfo(id_, name_, uri_);
-        if (lastScheduleOf[id_] == 0) {
+    // 玩家注册游戏
+    function register() public {
+        Register registerContract = Register(registerContractAddress);
+        uint id = registerContract.punkOf(msg.sender);
+        if (id == 0) {
+          while (punkMaster[freePunk] != address(0) || registerContract.punkOwner(id) != address(0)) {
+            freePunk ++;
+          }
+          require(freePunk <= 667, "no more free punks");
+          id = freePunk;
+          freePunk ++;
+        }
+        else {
+          isVIP[msg.sender] = true;
+        }
+        punkMaster[id] = msg.sender;
+        punkOf[msg.sender] = id;
+        if (lastScheduleOf[id] == 0) {
           uint t = getCurrentTime();
-          lastScheduleOf[id_] = t;
-          _addStillPunk(id_, 0, 0, t);
-          require(player_.send(1e16), "okt transfer failed");
+          lastScheduleOf[id] = t;
+          _addStillPunk(id, 0, 0, t);
         }
     }
 
@@ -131,9 +147,18 @@ contract RogueLand {
     // 兑换OKT
     function swapGold(address payable player_) public {
         require(player_ == msg.sender, "Please use your gold.");
-        require(stillPunks[playerInfo[player_].id].gold >= 1000, "Lack gold.");
-        stillPunks[playerInfo[player_].id].gold -= 1000;
+        require(stillPunks[punkOf[player_]].gold >= 1000, "Lack gold.");
+        require(getCurrentTime() != endRound, "The game is end now...");
+        stillPunks[punkOf[player_]].gold -= 1000;
         require(player_.send(1e16), "okt transfer failed");
+    }
+
+    // 设置游戏开始与结束时间
+    function startGame(uint startBlock_, uint endRound_) public {
+        require(msg.sender == owner, "Only admin can start the game.");
+        startBlock = startBlock_;
+        endRound = endRound_;
+        validBlockToPutGold = block.number;
     }
 
     // 设置金币参数
@@ -143,25 +168,34 @@ contract RogueLand {
         goldAmount = goldAmount_;
     }
 
+    function _putGold(int x, int y) private returns (bool) {
+      if (isValidToPutGold(x, y)) {
+        goldOn[x][y].vaildTime = 0;
+        goldOn[x][y].punkNumber = 0;
+        goldOn[x][y].amount += goldAmount;
+        emit GoldPut(punkOf[msg.sender], x, y, goldAmount, true);
+        return true;
+      }
+      else {
+        return false;
+      }
+    }
+
     // 放置金币
     function putGold() public {
-        require(block.number >= validBlockToPutGold, "Wait, the gold need some time to mint...");
+        require(getCurrentTime() != endRound && block.number >= validBlockToPutGold, "Wait, the gold need some time to mint...");
         _randNonce = uint(keccak256(abi.encode(block.timestamp, msg.sender, _randNonce)));
         int x = int(_randNonce % (2*mapSize+1)) - int(mapSize);
         _randNonce = uint(keccak256(abi.encode(block.timestamp, msg.sender, _randNonce)));
         int y = int(_randNonce % (2*mapSize+1)) - int(mapSize);
-        if (isValidToPutGold(x, y)) {
-          goldOn[x][y].vaildTime = 0;
-          goldOn[x][y].punkNumber = 0;
-          goldOn[x][y].amount += goldAmount;
-          validBlockToPutGold = block.number + goldInterval;
-          emit GoldPut(playerInfo[msg.sender].id, x, y, goldAmount, true);
+        bool put = _putGold(x, y) || _putGold(x, -y) || _putGold(-x, y) || _putGold(-x, -y);
+        if (put) {
+          validBlockToPutGold = validBlockToPutGold + goldInterval;
         }
         else {
           mapSize ++;
-          emit GoldPut(0, 0, 0, 0, false);
         }
-        stillPunks[playerInfo[msg.sender].id].gold += 100;
+        stillPunks[punkOf[msg.sender]].gold += 100;
     }
 
     // 获取金币
@@ -258,7 +292,7 @@ contract RogueLand {
 
     // 操作punk
     function scheduleAction(uint id, ActionChoices action) public {
-        require(playerInfo[msg.sender].id == id, "Get authorized first!");
+        require(punkOf[msg.sender] == id, "Get authorized first!");
         uint currentTime = getCurrentTime();
         if (lastScheduleOf[id] < currentTime) {
           lastScheduleOf[id] = currentTime;
@@ -298,7 +332,13 @@ contract RogueLand {
     }
 
     function getCurrentTime() public view returns (uint) {
-      uint time = (block.number - _startBlock) / blockPerRound;
+      if (startBlock == 0 || startBlock > block.number) {
+        return 0;
+      }
+      uint time = (block.number - startBlock) / blockPerRound + 1;
+      if (time > endRound) {
+        return endRound;
+      }
       return time;
     }
 
@@ -321,16 +361,58 @@ contract RogueLand {
       return StatusInfo(time, stillPunks[id].x, stillPunks[id].y);
     }
 
-    function getPlayerInfo(address player_) public view returns (PlayerInfo memory) {
-      return playerInfo[player_];
-    }
-
     function getGoldsofAllPunk() public view returns (uint[667] memory) {
       uint[667] memory golds;
       for (uint i=0; i<667; i++) {
         golds[i] = stillPunks[i+1].gold;
       }
       return golds;
+    }
+
+    function totalGold() public view returns (uint) {
+      uint totalGold_;
+      for (uint i=0; i<667; i++) {
+        if (isVIP[punkMaster[i+1]]) {
+          totalGold_ += stillPunks[i+1].gold*2;
+        }
+        else {
+          totalGold_ += stillPunks[i+1].gold;
+        }
+      }
+      return totalGold_;
+    }
+
+    // 设置奖励参数
+    function setTotalRewards(uint lowbAmount_, uint umgAmount_) public {
+        require(msg.sender == owner, "Only admin can set rewards.");
+        lowbAmount = lowbAmount_;
+        umgAmount = umgAmount_;
+    }
+
+    function pendingRewards(address player) public view returns (uint[2] memory) {
+        uint punkId = punkOf[player];
+        uint gold_ = isVIP[player] ? stillPunks[punkId].gold*2 : stillPunks[punkId].gold;
+        if (punkId == 0) {
+          gold_ = 0;
+        }
+        if (gold_ == 0) {
+          return [gold_, gold_];
+        }
+        uint totalGold_ = totalGold();
+        uint lowbRewards = gold_ * lowbAmount / totalGold_;
+        uint umgRewards = gold_ * umgAmount / totalGold_;
+        return [lowbRewards, umgRewards];
+    }
+
+    // 领取奖励
+    function claimRewards() public {
+        require(endRound != 0 && getCurrentTime() == endRound, "Not the time");
+        require(!claimed[msg.sender], "Claimed");
+        uint[2] memory pendingRewards_ = pendingRewards(msg.sender);
+        claimed[msg.sender] = true;
+        Register registerContract = Register(registerContractAddress);
+        registerContract.award(msg.sender, 0, pendingRewards_[0]);
+        registerContract.award(msg.sender, 1, pendingRewards_[1]);
     }
 
 }

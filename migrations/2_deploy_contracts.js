@@ -1,6 +1,9 @@
 const RogueLand = artifacts.require("RogueLand");
+const Register = artifacts.require("Register");
 
-module.exports = function(deployer) {
-  const nftAddress = '0xe031188b0895afd3f3c32b2bf27fbd1ab9e8c9ea';
-  deployer.deploy(RogueLand);
+module.exports = async function(deployer) {
+  await deployer.deploy(Register);
+  const registerContract = await Register.deployed();
+  await deployer.deploy(RogueLand, registerContract.address);
+  const RogueLandContract = await Register.deployed();
 };
