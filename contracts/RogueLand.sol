@@ -1,56 +1,70 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;
 
-import "./register.sol";
+import "./NewRegister.sol";
 
 contract RogueLand {
     
     enum ActionChoices { SitStill, GoLeft, GoRight, GoUp, GoDown, GoLeftUp, GoLeftDown, GoRightUp, GoRightDown }
 	
-    struct Event {
-      uint movingPunk;
-      uint monster;
+    struct MovingPunk {
+      uint punkId;
+      uint punkNonce;
     }
 
-    struct Gold {
-      uint amount;
-      uint vaildTime;
-      uint punkNumber;
+    struct MapInfo {
+      uint punk;
+      uint gold;
     }
 
-    struct StatusInfo {
+    struct TimeSpace {
       uint t;
       int x;
       int y;
     }
 
-    struct MovingPunk {
-      uint newNeighbor;
-      ActionChoices action;
+    struct Position {
       int x;
       int y;
     }
 
-    struct StillPunk {
-      uint oldNeighbor;
-      uint newNeighbor;
+    struct StillPunk {      
       int x;
       int y;
       uint showtime;
       uint gold;
+      uint hep;
+      uint enemy;
+      uint hp;
+      uint nonce; // 代表死亡次数
     }
 
+    // 需额外记录人头数
+    struct PunkInfo {      
+      int x;
+      int y;
+      bool isMoving;
+      uint gold;
+      uint pendingGold;
+      uint hep;
+      uint hp;
+      uint seed;
+      address player;
+      string name;
+    }
+
+    uint public constant AC = 9; // 防御力
+    uint public constant BAREHAND = 5; // 徒手攻击
+    
     address public owner;
     address public registerContractAddress;
     uint public startBlock; // 记录初始区块数
     uint public endRound; // 记录结束的回合
     uint private _randNonce;
-    uint public mapSize = 5;
-    uint public activeRound = 150;
+    //uint public mapSize = 5;
+    //uint public activeRound = 50;
     uint public blockPerRound = 500;
-    uint public goldInterval = 500;
-    uint public goldAmount = 10000;
-    uint public validBlockToPutGold;
+    uint public rewardsPerRound = 100;
     uint public freePunk = 2;
     uint public lowbAmount;
     uint public umgAmount;
@@ -61,10 +75,14 @@ contract RogueLand {
     mapping (address => bool) public isVIP;
 
     // 储存punk的时空信息
-    mapping (uint => mapping (uint => MovingPunk)) public movingPunks;
+    mapping (uint => mapping (uint => Position)) public movingPunks;
 
     // 储存punk最后规划的信息
     mapping (uint => uint) public lastScheduleOf;
+
+    // 储存随机种子，用于战斗
+    mapping (uint => uint) private _randseedOfRound;
+    mapping (uint => uint) private _randseedOfPunk;
 
     // 储存punk最后的位置信息
     mapping (uint => StillPunk) public stillPunks;
@@ -72,22 +90,24 @@ contract RogueLand {
     // 储存静止punk的空间信息
     mapping (int => mapping (int => uint)) public stillPunkOn;
 
-    // 储存金矿的空间信息
-    mapping (int => mapping (int => Gold)) public goldOn;
+    // 储存药水合成信息
+    mapping (uint => mapping (uint => bool)) public cooked;
   
     // 储存时空信息
-    mapping (uint => mapping (int => mapping (int => Event))) public events;
+    mapping (uint => mapping (int => mapping (int => MovingPunk))) public movingPunksOn;
 
     // 储存奖励信息
     mapping (address => bool) public claimed;
 
     event ActionCommitted(uint indexed punkId, uint indexed time, ActionChoices action);
-    event GoldPicked(uint indexed punkId, uint indexed time, int x, int y, uint amount);
-    event GoldPut(uint indexed punkId, int x, int y, uint amount, bool isPut);
+    event Attacked(uint indexed punkA, uint indexed punkB, uint damage);
+    event Killed(uint indexed punkA, uint indexed punkB);
   
     constructor(address registerContractAddress_) {
         owner = msg.sender;
         registerContractAddress = registerContractAddress_;
+        _randNonce = uint(keccak256(abi.encode(block.timestamp, msg.sender)));
+        _randseedOfRound[0] = _randNonce;
     }
 
     // Function to receive Ether. msg.data must be empty
@@ -96,18 +116,19 @@ contract RogueLand {
     // Fallback function is called when msg.data is not empty
     fallback() external payable {}
 
-    function getEvents(int x1, int y1, int x2, int y2, uint t) public view returns (Event[] memory) {
+    // 增加下一回合信息
+    function getEvents(int x1, int y1, int x2, int y2, uint t) public view returns (uint[] memory) {
         require(x2 >= x1 && y2 >= y1, "Invalid index");
-        Event[] memory selectEvents = new Event[](uint((x2-x1+1)*(y2-y1+1)));
+        uint[] memory selectEvents = new uint[](uint((x2-x1+1)*(y2-y1+1)));
         uint i = 0;
         for (int x=x1; x<=x2; x++) {
           for (int y=y1; y<=y2; y++) {
-            selectEvents[i] = events[t][x][y];
-            if (events[t][x][y].movingPunk == 0 && stillPunks[stillPunkOn[x][y]].showtime <= t) {
-              selectEvents[i].movingPunk = stillPunkOn[x][y];
+            //selectEvents[i] = events[t][x][y];
+            if (movingPunksOn[t][x][y].punkNonce == stillPunks[movingPunksOn[t][x][y].punkId].nonce) {
+              selectEvents[i] = movingPunksOn[t][x][y].punkId;
             }
-            if (goldOn[x][y].vaildTime == 0 || goldOn[x][y].vaildTime >= t) {
-              selectEvents[i].monster = goldOn[x][y].amount;
+            if (stillPunkOn[x][y] != 0 && stillPunks[stillPunkOn[x][y]].showtime <= t) {
+              selectEvents[i] = stillPunkOn[x][y];
             }
             i ++;
           }
@@ -115,9 +136,32 @@ contract RogueLand {
         return selectEvents;
     }
 
+    function _resetPunk(uint id) private {
+      uint t = getCurrentTime();
+      lastScheduleOf[id] = t;
+      stillPunks[id].hp = 15; // 初始生命值为15
+      stillPunks[id].nonce ++;
+
+      int n = int(id%100) / 2 - 24; // punk将根据序号分为4组排布在外城边界上
+      if (id % 4 == 0) {
+        _moveStillPunk(id, n, 25, t);
+      }
+      else if (id % 4 == 1) {
+        _moveStillPunk(id, -n, -25, t);
+      }
+      else if (id % 4 == 2) {
+        _moveStillPunk(id, 25, -n, t);
+      }
+      else if (id % 4 == 3) {
+        _moveStillPunk(id, -25, n, t);
+      }
+      
+    }
+    
     // 玩家注册游戏
     function register() public {
-        Register registerContract = Register(registerContractAddress);
+        require(punkOf[msg.sender] == 0, "registered!");
+        NewRegister registerContract = NewRegister(registerContractAddress);
         uint id = registerContract.punkOf(msg.sender);
         if (id == 0) {
           while (punkMaster[freePunk] != address(0) || registerContract.punkOwner(id) != address(0)) {
@@ -132,20 +176,24 @@ contract RogueLand {
         }
         punkMaster[id] = msg.sender;
         punkOf[msg.sender] = id;
-        if (lastScheduleOf[id] == 0) {
-          uint t = getCurrentTime();
-          lastScheduleOf[id] = t;
-          _addStillPunk(id, 0, 0, t);
-        }
-    }
-
-    function isValidToPutGold(int x, int y) public view returns (bool) {
-      uint time = getCurrentTime();
-      return stillPunkOn[x][y] == 0 && events[time][x][y].movingPunk == 0 && (goldOn[x][y].vaildTime == 0 || time > goldOn[x][y].vaildTime + activeRound);
+        _randseedOfPunk[id] = uint(keccak256(abi.encode(block.timestamp, msg.sender, _randNonce)));
+        _resetPunk(id);
     }
 
     // 兑换OKT
-    function swapGold(address payable player_) public {
+    function swapHEP() public {
+        uint t = getCurrentTime();
+        uint id = punkOf[msg.sender];
+        require(id > 0 && !cooked[id][t], "You have cooked the potion this round.");
+        require(stillPunks[id].gold >= 200, "Lack gold.");
+        require(t != endRound, "The game is end now...");
+        stillPunks[id].gold -= 200;
+        stillPunks[id].hep ++;
+        cooked[id][t] = true;
+    }
+
+    // 兑换OKT
+    function swapOKT(address payable player_) public {
         require(player_ == msg.sender, "Please use your gold.");
         require(stillPunks[punkOf[player_]].gold >= 1000, "Lack gold.");
         require(getCurrentTime() != endRound, "The game is end now...");
@@ -158,137 +206,122 @@ contract RogueLand {
         require(msg.sender == owner, "Only admin can start the game.");
         startBlock = startBlock_;
         endRound = endRound_;
-        validBlockToPutGold = block.number;
     }
 
-    // 设置金币参数
-    function setGold(uint goldInterval_, uint goldAmount_) public {
-        require(msg.sender == owner, "Only admin can put gold.");
-        goldInterval = goldInterval_;
-        goldAmount = goldAmount_;
+
+    // punkA击杀了punkB
+    function _kill(uint A, uint B) private {
+      // 阻止B后续的移动，将B送回原点，并恢复生命值
+      _resetPunk(B);
+      // A获得了B的所有金币以及药水
+      stillPunks[A].gold += (stillPunks[B].gold + pendingGold(B));
+      stillPunks[B].gold = 0;
+	  stillPunks[A].hep += stillPunks[B].hep;
+      stillPunks[B].hep = 0;
+      stillPunks[A].enemy = 0;
+      stillPunks[B].enemy = 0;
+	    emit Killed(A, B);
+    }
+    
+    // punkA向punkB进攻
+    function _attack(uint A, uint B) private {
+      // 命中检定1d20，徒手攻击1d5
+      _randseedOfPunk[B] = uint(keccak256(abi.encode(A, _randseedOfPunk[B])));
+      uint dice = _randseedOfPunk[B] % 100;
+      // 骰点小于 10+被攻击者AC 时攻击命中
+      if (dice/5+1 < 10+AC) {
+        // 徒手攻击，伤害值1d5
+        stillPunks[B].hp = (stillPunks[B].hp < (dice%5+1)? 0 : stillPunks[B].hp-(dice%5+1));
+		    emit Attacked(A, B, dice%5+1);
+      }
+	    else {
+		    emit Attacked(A, B, 0);
+	    }
     }
 
-    function _putGold(int x, int y) private returns (bool) {
-      if (isValidToPutGold(x, y)) {
-        goldOn[x][y].vaildTime = 0;
-        goldOn[x][y].punkNumber = 0;
-        goldOn[x][y].amount += goldAmount;
-        emit GoldPut(punkOf[msg.sender], x, y, goldAmount, true);
-        return true;
+    // punkA向punkB进攻
+    function attack(uint A, uint B) public {
+      require(punkOf[msg.sender] == A, "Get authorized first!");
+      uint t = getCurrentTime();
+      Position memory posA = getPostion(A, t);
+      Position memory posB = getPostion(B, t);
+	    require(stillPunks[B].showtime <= t, "punk B is moving");
+      require(posA.x**2 < 625 && posA.y**2 < 625 && posB.x**2 < 625 && posB.y**2 < 625, "cannot attack punks outside the game area");
+      require((posA.x-posB.x)**2 <=1  &&  (posA.y-posB.y)**2 <=1, "can only attack neighbors");
+
+      if (stillPunks[A].enemy != B) {
+        stillPunks[A].enemy = B;
+      }
+
+      _attack(A, B);
+      if (stillPunks[B].hp == 0) {
+        _kill(A, B);
       }
       else {
-        return false;
+        // punkB自动反击
+        _attack(B, A);
+        if (stillPunks[A].hp == 0) {
+          _kill(B, A);
+        }
+      }
+    }
+
+    // 离开战斗，会受到一次攻击
+    function leaveBattle(uint id) public {
+      require(punkOf[msg.sender] == id, "Get authorized first!");
+      require(stillPunks[id].enemy != 0, "no enemy");
+      stillPunks[id].enemy = 0;
+      uint t = getCurrentTime();
+	    Position memory posA = getPostion(stillPunks[id].enemy, t);
+      Position memory posB = getPostion(id, t);
+	    if ((posA.x-posB.x)**2 <=1  &&  (posA.y-posB.y)**2 <=1) {
+		    _attack(stillPunks[id].enemy, id);
+        if (stillPunks[id].hp == 0) {
+          _kill(stillPunks[id].enemy, id);
+        }
+	    }
+    }
+
+    // 只能在非战状态下时使用HEP
+    function useHEP(uint id) public {
+      require(punkOf[msg.sender] == id, "Get authorized first!");
+      require(stillPunks[id].hep > 0, "Lack potion.");
+      // 之后加入该机制
+	  //if (stillPunks[id].enemy != 0) {
+      //  leaveBattle(id);
+      //}
+      stillPunks[id].hep --;
+      stillPunks[id].hp += 10;
+      if (stillPunks[id].hp > 15) {
+        stillPunks[id].hp = 15;
       }
     }
 
-    // 放置金币
-    function putGold() public {
-        require(getCurrentTime() != endRound && block.number >= validBlockToPutGold, "Wait, the gold need some time to mint...");
-        _randNonce = uint(keccak256(abi.encode(block.timestamp, msg.sender, _randNonce)));
-        int x = int(_randNonce % (2*mapSize+1)) - int(mapSize);
-        _randNonce = uint(keccak256(abi.encode(block.timestamp, msg.sender, _randNonce)));
-        int y = int(_randNonce % (2*mapSize+1)) - int(mapSize);
-        bool put = _putGold(x, y) || _putGold(x, -y) || _putGold(-x, y) || _putGold(-x, -y);
-        if (put) {
-          validBlockToPutGold = validBlockToPutGold + goldInterval;
-        }
-        else {
-          mapSize ++;
-        }
-        stillPunks[punkOf[msg.sender]].gold += 100;
-    }
-
-    // 获取金币
-    function getGold(int x, int y) public {
-        require(goldOn[x][y].punkNumber > 0 , "Nothing to do.");
-        uint t = goldOn[x][y].vaildTime;
-        require(getCurrentTime() >= t, "Wait, it is not the time.");
-        uint id = stillPunkOn[x][y];
-        uint amount = goldOn[x][y].amount / goldOn[x][y].punkNumber;
-        while (id != 0) {
-          stillPunks[id].gold += amount;
-          id = stillPunks[id].newNeighbor;
-          emit GoldPicked(id, t, x, y, amount);
-        }
-        id = events[t][x][y].movingPunk;
-        while (id != 0) {
-          stillPunks[id].gold += amount;
-          id = movingPunks[id][t].newNeighbor;
-          emit GoldPicked(id, t, x, y, amount);
-        }
-        goldOn[x][y].vaildTime = 0;
-        goldOn[x][y].punkNumber = 0;
-        goldOn[x][y].amount = 0;
-    }
-
-    function getEvent(uint id) public view returns (StatusInfo memory) {
-      if (lastScheduleOf[id] == 0) {
-        return StatusInfo(0, 0, 0);
-      }
-      uint time = getCurrentTime();
-      uint start = time > 150? time-150: 1;
-      uint end = time < lastScheduleOf[id]-1? time: lastScheduleOf[id]-1;
-      for (uint t=start; t<=end; t++) {
-        int x_ = movingPunks[id][t].x;
-        int y_ = movingPunks[id][t].y;
-        if (goldOn[x_][y_].vaildTime == t) {
-          return StatusInfo(t, x_, y_);
-        }
-      }
-      if (lastScheduleOf[id] <= time) {
-        int x = stillPunks[id].x;
-        int y = stillPunks[id].y;
-        if (goldOn[x][y].vaildTime == lastScheduleOf[id]) {
-          return StatusInfo(lastScheduleOf[id], x, y);
-        }
-      }
-      return StatusInfo(0, 0, 0);
-    }
-
-    function _removeStillPunk(uint id, int x, int y) private {
-        uint oldNeighbor = stillPunks[id].oldNeighbor;
-        uint newNeighbor = stillPunks[id].newNeighbor;
-        if (oldNeighbor > 0) {
-          stillPunks[oldNeighbor].newNeighbor = newNeighbor;
-        }
-        else {
-          stillPunkOn[x][y] = newNeighbor;
-        }
-        if (newNeighbor > 0) {
-          stillPunks[newNeighbor].oldNeighbor = oldNeighbor;
-        }
-    }
-
-    function _addStillPunk(uint id, int x, int y, uint t) private {
-        uint latestNeighbor = stillPunkOn[x][y];
+    function _moveStillPunk(uint id, int x, int y, uint t) private {
+        require(getPunkOn(t, x, y) == 0 || x**2 == 625 || y**2 == 625, "other punk was already on it");
+        int x_ = stillPunks[id].x;
+        int y_ = stillPunks[id].y;
+        stillPunkOn[x_][y_] = 0;
         stillPunkOn[x][y] = id;
-        stillPunks[id].oldNeighbor = 0;
-        stillPunks[id].newNeighbor = latestNeighbor;
         stillPunks[id].x = x;
         stillPunks[id].y = y;
         stillPunks[id].showtime = t;
-        if (latestNeighbor > 0) {
-          stillPunks[latestNeighbor].oldNeighbor = id;
-        }
-        // 自动拾取金币
-        if (goldOn[x][y].amount > 0 && (goldOn[x][y].vaildTime == 0 || goldOn[x][y].vaildTime >= t)) {
-          if (goldOn[x][y].vaildTime == t) {
-            goldOn[x][y].punkNumber ++;
-          }
-          else {
-            goldOn[x][y].punkNumber = 1;
-          }
-          goldOn[x][y].vaildTime = t;
+        
+    }
+
+    function _addMovingPunk(uint id, uint t, int x, int y) private {
+        movingPunksOn[t][x][y].punkId = id;
+        movingPunksOn[t][x][y].punkNonce = stillPunks[id].nonce;
+        movingPunks[id][t].x = x;
+        movingPunks[id][t].y = y;
+        // 自动进行挖矿操作
+        uint gold = pendingGold(id);
+        if (gold > 0) {
+          stillPunks[id].gold += gold;
         }
     }
 
-    function _addMovingPunk(uint id, uint t, int x, int y, ActionChoices action) private {
-        movingPunks[id][t].newNeighbor = events[t][x][y].movingPunk;
-        events[t][x][y].movingPunk = id;
-        movingPunks[id][t].action = action;
-        movingPunks[id][t].x = x;
-        movingPunks[id][t].y = y;
-    }
+
 
     // 操作punk
     function scheduleAction(uint id, ActionChoices action) public {
@@ -301,31 +334,30 @@ contract RogueLand {
         int x = stillPunks[id].x;
         int y = stillPunks[id].y;
         // remove this punk from still punks in (x, y) 
-        _removeStillPunk(id, x, y);
-        _addMovingPunk(id, t, x, y, action);
+        _addMovingPunk(id, t, x, y);
         if (action == ActionChoices.GoLeft) {
-          _addStillPunk(id, x-1, y, t+1);
+          _moveStillPunk(id, x-1, y, t+1);
         }
         if (action == ActionChoices.GoRight) {
-          _addStillPunk(id, x+1, y, t+1);
+          _moveStillPunk(id, x+1, y, t+1);
         }
         if (action == ActionChoices.GoUp) {
-          _addStillPunk(id, x, y+1, t+1);
+          _moveStillPunk(id, x, y+1, t+1);
         }
         if (action == ActionChoices.GoDown) {
-          _addStillPunk(id, x, y-1, t+1);
+          _moveStillPunk(id, x, y-1, t+1);
         }
         if (action == ActionChoices.GoLeftUp) {
-          _addStillPunk(id, x-1, y+1, t+1);
+          _moveStillPunk(id, x-1, y+1, t+1);
         }
         if (action == ActionChoices.GoLeftDown) {
-          _addStillPunk(id, x-1, y-1, t+1);
+          _moveStillPunk(id, x-1, y-1, t+1);
         }
         if (action == ActionChoices.GoRightUp) {
-          _addStillPunk(id, x+1, y+1, t+1);
+          _moveStillPunk(id, x+1, y+1, t+1);
         }
         if (action == ActionChoices.GoRightDown) {
-          _addStillPunk(id, x+1, y-1, t+1);
+          _moveStillPunk(id, x+1, y-1, t+1);
         }
         lastScheduleOf[id] ++;
         emit ActionCommitted(id, lastScheduleOf[id], action);
@@ -342,23 +374,49 @@ contract RogueLand {
       return time;
     }
 
-    function getCurrentStatus(uint id) public view returns (StatusInfo memory) {
-      uint time = getCurrentTime();
-      if (lastScheduleOf[id] > time) {
-        return StatusInfo(time, movingPunks[id][time].x, movingPunks[id][time].y);
-      }
-      else {
-        return StatusInfo(time, stillPunks[id].x, stillPunks[id].y);
-      }
-      
+    function getPunkInfo(uint id) public view returns (PunkInfo memory) {
+      uint t = getCurrentTime();
+      Position memory pos = getPostion(id, t);
+      address player = punkMaster[id];
+      NewRegister registerContract = NewRegister(registerContractAddress);
+      (string memory name, , ,) = registerContract.accountInfo(player);
+      return PunkInfo(pos.x, pos.y, stillPunks[id].showtime>t, stillPunks[id].gold, pendingGold(id), stillPunks[id].hep, stillPunks[id].hp, _randseedOfPunk[id], player, name);
     }
 
-    function getScheduleInfo(uint id) public view returns (StatusInfo memory) {
+    function getPunkOn(uint t, int x, int y) public view returns (uint) {
+      if (stillPunkOn[x][y] != 0) {
+        return stillPunkOn[x][y];
+      }
+      else {
+        uint id = movingPunksOn[t][x][y].punkId;
+        if (movingPunksOn[t][x][y].punkNonce == stillPunks[id].nonce) {
+          return id;
+        }
+      }
+      return 0;
+    }
+
+    function getPostion(uint id, uint t) public view returns (Position memory) {
+      if (lastScheduleOf[id] > t) {
+        return Position(movingPunks[id][t].x, movingPunks[id][t].y);
+      }
+      else {
+        return Position(stillPunks[id].x, stillPunks[id].y);
+      }
+    }
+
+    function getCurrentStatus(uint id) public view returns (TimeSpace memory) {
+      uint time = getCurrentTime();
+      Position memory pos = getPostion(id, time);
+      return TimeSpace(time, pos.x, pos.y);
+    }
+
+    function getScheduleInfo(uint id) public view returns (TimeSpace memory) {
       uint time = getCurrentTime();
       if (lastScheduleOf[id] > time) {
         time = lastScheduleOf[id];
       }
-      return StatusInfo(time, stillPunks[id].x, stillPunks[id].y);
+      return TimeSpace(time, stillPunks[id].x, stillPunks[id].y);
     }
 
     function getGoldsofAllPunk() public view returns (uint[667] memory) {
@@ -382,6 +440,44 @@ contract RogueLand {
       return totalGold_;
     }
 
+    function getProductivity(int x, int y) public pure returns (uint) {
+      if (x == 0 && y == 0) {
+        return 100;
+      }
+      else if (x**2 <= 1  &&  y**2 <= 1) {
+        return 25;
+      }
+      else if (x**2 <= 9  &&  y**2 <= 9) {
+        return 10;
+      }
+      else if (x**2 <= 36  &&  y**2 <= 36) {
+        return 5;
+      }
+      else if (x**2 <= 100  &&  y**2 <= 100) {
+        return 3;
+      }
+      else if (x**2 <= 225  &&  y**2 <= 225) {
+        return 2;
+      }
+      else if (x**2 <= 576  &&  y**2 <= 576) {
+        return 1;
+      }
+      else {
+        return 0;
+      }
+    }
+
+    function pendingGold(uint id) public view returns (uint) {
+      uint time = getCurrentTime();
+      if (stillPunks[id].showtime < time) {
+        uint productivity = getProductivity(stillPunks[id].x, stillPunks[id].y);
+        return (time - stillPunks[id].showtime) * productivity * rewardsPerRound;
+      }
+      else {
+        return 0;
+      }
+    }
+
     // 设置奖励参数
     function setTotalRewards(uint lowbAmount_, uint umgAmount_) public {
         require(msg.sender == owner, "Only admin can set rewards.");
@@ -392,7 +488,7 @@ contract RogueLand {
     function pendingRewards(address player) public view returns (uint[2] memory) {
         uint punkId = punkOf[player];
         uint gold_ = isVIP[player] ? stillPunks[punkId].gold*2 : stillPunks[punkId].gold;
-        if (punkId == 0) {
+        if (punkId == 0 || claimed[msg.sender]) {
           gold_ = 0;
         }
         if (gold_ == 0) {
@@ -410,7 +506,7 @@ contract RogueLand {
         require(!claimed[msg.sender], "Claimed");
         uint[2] memory pendingRewards_ = pendingRewards(msg.sender);
         claimed[msg.sender] = true;
-        Register registerContract = Register(registerContractAddress);
+        NewRegister registerContract = NewRegister(registerContractAddress);
         registerContract.award(msg.sender, 0, pendingRewards_[0]);
         registerContract.award(msg.sender, 1, pendingRewards_[1]);
     }
