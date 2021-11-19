@@ -74,7 +74,7 @@ module.exports = {
       skipDryRun: true
     },
 	testnet: {
-      provider: () => new HDWalletProvider(mnemonic, `https://data-seed-prebsc-1-s2.binance.org:8545`),
+      provider: () => new HDWalletProvider(mnemonic, `https://data-seed-prebsc-1-s1.binance.org:8545`),
       network_id: 97,
       confirmations: 10,
       timeoutBlocks: 200,
@@ -93,6 +93,7 @@ module.exports = {
       network_id: 66,
       confirmations: 10,
       timeoutBlocks: 200,
+      gasPrice: 1000000000,
       skipDryRun: true
     },
     // Another network with more advanced options...
@@ -132,13 +133,13 @@ module.exports = {
     solc: {
       version: "0.8.0",    // Fetch exact version from solc-bin (default: truffle's version)
       // docker: true,        // Use "0.5.1" you've installed locally with docker (default: false)
-      // settings: {          // See the solidity docs for advice about optimization and evmVersion
-      //  optimizer: {
-      //    enabled: false,
-      //    runs: 200
-      //  },
+      settings: {          // See the solidity docs for advice about optimization and evmVersion
+        optimizer: {
+          enabled: true,
+          runs: 200
+        },
       //  evmVersion: "byzantium"
-      // }
+      }
     }
   },
 
