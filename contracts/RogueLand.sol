@@ -399,6 +399,7 @@ contract RogueLand {
     function scheduleAction(uint id, ActionChoices action) public {
         require(punkOf[msg.sender] == id, "Get authorized first!");
         require(id > 0, "Punk not exit!");
+        require(action != ActionChoices.SitStill, "Not allowed!");
         uint currentTime = getCurrentTime();
         if (lastScheduleOf[id] < currentTime) {
           lastScheduleOf[id] = currentTime;
@@ -493,7 +494,7 @@ contract RogueLand {
     function getGoldsofAllPunk() public view returns (uint[667] memory) {
       uint[667] memory golds;
       for (uint i=0; i<667; i++) {
-        golds[i] = stillPunks[i+1].gold + pendingGold(i+1);
+        golds[i] = punkMaster[i+1] == address(0) ? 0 : stillPunks[i+1].gold;
       }
       return golds;
     }
