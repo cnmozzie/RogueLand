@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;
 
-import "@openzeppelin/contracts/token/ERC721/IERC721.sol";
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "./Building.sol";
 
 contract RogueLand {
     
@@ -57,32 +56,31 @@ contract RogueLand {
       uint seed;
       address player;
       string name;
+      uint blockNumber;
     }
 
     struct GameInfo {
-      uint evenPunk;
-      uint oddPunk;
+      uint total;
+      uint dead;
       uint pool;
       uint squidBalance;
       uint squidApproved;
       uint hepBalance;
       uint hepApproved;
-      bool hasNFT;
-      bool hasPunk;
     }
 
     uint public constant AC = 9; // 防御力
     uint public constant BAREHAND = 5; // 徒手攻击
     
     address public owner;
-    address public cherryNFTAddress;
     address public hepAddress;
     address public squidAddress;
+    address public buildingAddress;
     uint public startBlock; // 记录初始区块数
     uint private _randNonce;
     uint public blockPerRound = 500;
     uint public rewardsPerRound = 5e15;
-    bool public gameOver;
+    //bool public gameOver;
     uint public totalPunk; // 记录报名信息
     address[] public deadPunk; // 记录死亡信息
 
@@ -91,7 +89,6 @@ contract RogueLand {
     mapping (uint => address) public punkMaster;
     mapping (address => uint) public punkOf;
     mapping (address => string) public nickNameOf;
-    mapping (address => bool) public isVIP;
 
     // 储存punk的时空信息
     mapping (uint => mapping (uint => Position)) public movingPunks;
@@ -120,9 +117,9 @@ contract RogueLand {
     event Attacked(uint indexed punkA, uint indexed punkB, uint damage);
     event Killed(uint indexed punkA, uint indexed punkB);
   
-    constructor(address cherryNFTAddress_, address hepAddress_, address squidAddress_) {
+    constructor(address buildingAddress_, address hepAddress_, address squidAddress_) {
         owner = msg.sender;
-        cherryNFTAddress = cherryNFTAddress_;
+        buildingAddress = buildingAddress_;
         hepAddress = hepAddress_;
         squidAddress = squidAddress_;
         _randNonce = uint(keccak256(abi.encode(block.timestamp, msg.sender)));
@@ -151,27 +148,14 @@ contract RogueLand {
         return _deadPunks;
     }
 
-    function _resetPunk(uint id) private {
+    function _resetPunk(uint id, int x, int y) private {
       uint t = getCurrentTime();
       lastScheduleOf[id] = t;
       stillPunks[id].hp = 15; // 初始生命值为15
       stillPunks[id].nonce = t;
       stillPunks[id].evil = 0;
-
-      int n = int(id%100) / 2 - 24; // punk将根据序号分为4组排布在外城边界上
-      if (id % 4 == 0) {
-        _addStillPunk(id, n, 25, t);
-      }
-      else if (id % 4 == 1) {
-        _addStillPunk(id, -n, -25, t);
-      }
-      else if (id % 4 == 2) {
-        _addStillPunk(id, 25, -n, t);
-      }
-      else if (id % 4 == 3) {
-        _addStillPunk(id, -25, n, t);
-      }
-      
+      stillPunks[id].gold = 0;
+      _addStillPunk(id, x, y, t);
     }
 
     // 玩家设置昵称
@@ -179,92 +163,61 @@ contract RogueLand {
         nickNameOf[msg.sender] = name;
     }
 
-    function setVIP(address[] calldata vips) public {
-        require(msg.sender == owner, "Only admin can set VIPs.");
-        uint length = vips.length;
-        // batch set
-        for (uint i=0; i<length; i++) {
-            isVIP[vips[i]] = true;
+    function freePunk() public view returns (uint) {
+      uint id;
+      for (id=2; id<=667; id++) {
+        if (punkMaster[id] == address(0)) {
+          break;
         }
-    }
-
-    function freePunk() public view returns (uint, uint) {
-        uint i;
-        uint odd;
-        uint even;
-        for (i=2; i<=667; i=i+2) {
-          if (punkMaster[i] == address(0)) {
-            even = i;
-            break;
-          }
-        }
-        for (i=3; i<=667; i=i+2) {
-          if (punkMaster[i] == address(0)) {
-            odd = i;
-            break;
-          }
-        }
-        return (even, odd);
+      }
+      return id;
     }
 
     function gameInfo(address player) public view returns (GameInfo memory) {
-        (uint even, uint odd) = freePunk();
-        if (getCurrentTime() > 0) {
-          even = 0;
-          odd = deadPunk.length;
-        }
+        uint total = totalPunk;
+        uint dead = deadPunk.length;
         IERC20 squid = IERC20(squidAddress);
-        uint pool = squid.balanceOf(address(this));
+        uint pool = squid.balanceOf(buildingAddress);
         uint squidBalance = squid.balanceOf(player);
-        uint squidApproved = squid.allowance(player, address(this));
+        uint squidApproved = squid.allowance(player, buildingAddress);
         IERC20 hep = IERC20(hepAddress);
         uint hepBalance = hep.balanceOf(player);
         uint hepApproved = hep.allowance(player, address(this));
-        IERC721 cherryNFT = IERC721(cherryNFTAddress);
-        uint nfts = cherryNFT.balanceOf(player);
-        bool vip = isVIP[player];
-        return GameInfo(even, odd, pool, squidBalance, squidApproved, hepBalance, hepApproved, nfts>0, vip);
+        return GameInfo(total, dead, pool, squidBalance, squidApproved, hepBalance, hepApproved);
     }
-    
-    // 玩家注册游戏
-    function _register(uint id) private {
-        require(!gameOver, 'game over');
+
+    function register(uint id) public {
+        if (id == 0) {
+          id = freePunk();
+        }
+        require(id >= 2 && id <= 667, 'invalid');
+        require(punkMaster[id] == address(0), 'not free punk');
         require(punkOf[msg.sender] == 0, "registered!");
-        require(id <= 667, 'no position for now');
+        Building building = Building(buildingAddress);
+        (int x, int y) = building.playerLand(msg.sender);
+        (,,,bool used,) = building.landInfo(x, y);
+        if (used) {
+          building.payFee(msg.sender, 1e18);
+        }
+        else {
+          building.setUsed(x, y);
+        }
         punkMaster[id] = msg.sender;
         punkOf[msg.sender] = id;
         _randseedOfPunk[id] = uint(keccak256(abi.encode(block.timestamp, msg.sender, _randNonce)));
-        _resetPunk(id);
+        _resetPunk(id, x, y);
         totalPunk ++;
-    }
-
-    function registerWithPunk() public {
-        require(getCurrentTime() == 0, 'too late');
-        require(isVIP[msg.sender], 'You do not have loser punk');
-        (uint id, ) = freePunk();
-        _register(id);
-    }
-
-    function registerWithNFT() public {
-        require(getCurrentTime() == 0, 'too late');
-        IERC721 cherryNFT = IERC721(cherryNFTAddress);
-        require(cherryNFT.balanceOf(msg.sender) > 0, 'You do not have cherry NFT');
-        ( , uint id) = freePunk();
-        _register(id);
-    }
-
-    function registerWithSquid() public {
-        IERC20 squid = IERC20(squidAddress);
-        require(squid.transferFrom(msg.sender, address(this), 1e18), 'Failed to transfer the squid token');
-        (uint even, uint odd) = freePunk();
-        uint id = even < odd? even : odd;
-        _register(id);
     }
 
     // 设置游戏开始与结束时间
     function startGame(uint startBlock_) public {
         require(msg.sender == owner, "Only admin can start the game.");
         startBlock = startBlock_;
+    }
+
+    function setRewards(uint rewards) public {
+        require(msg.sender == owner, "Only admin can start the game.");
+        rewardsPerRound = rewards;
     }
 
 
@@ -284,7 +237,8 @@ contract RogueLand {
       stillPunks[B].enemy = 0;
       // A变得更邪恶了
       stillPunks[A].evil ++;
-      _reward(punkMaster[A], 2e17);
+      Building building = Building(buildingAddress);
+      building.award(msg.sender, 2e17);
       
 	    emit Killed(A, B);
     }
@@ -317,6 +271,8 @@ contract RogueLand {
       require(t > stillPunks[B].nonce, "punk B is just born!");
       //require(posA.x**2 < 625 && posA.y**2 < 625 && posB.x**2 < 625 && posB.y**2 < 625, "cannot attack punks outside the game area");
       require((posA.x-posB.x)**2 <=1  &&  (posA.y-posB.y)**2 <=1, "can only attack neighbors");
+      Building building = Building(buildingAddress);
+      require(!building.isHouse(posB.x, posB.y), "cannot attack punk in the house");
 
       if (stillPunks[A].enemy != B) {
         stillPunks[A].enemy = B;
@@ -368,7 +324,14 @@ contract RogueLand {
     }
 
     function _addStillPunk(uint id, int x, int y, uint t) private {
-        require (getPunkOn(t, x, y) == 0 || x**2 == 625  ||  y**2 == 625, 'other punk already on it!');
+        Building building = Building(buildingAddress);
+        LoserLand loserLand = LoserLand(building.landAddress());
+        address landOwner = loserLand.landOwner(x, y);
+        if (building.isHouse(x, y) && msg.sender != landOwner) {
+          building.payFee(msg.sender, 5e16);
+          building.award(landOwner, 5e16);
+        }
+        require (getPunkOn(t, x, y) == 0 || building.isHouse(x, y), 'other punk already on it!');
         uint latestNeighbor = stillPunkOn[x][y];
         stillPunkOn[x][y] = id;
         stillPunks[id].oldNeighbor = 0;
@@ -452,7 +415,7 @@ contract RogueLand {
       address player = punkMaster[id];
       uint totalGold = stillPunks[id].gold + pendingGold(id);
       bool isMoving = (t == stillPunks[id].nonce) || (stillPunks[id].showtime > t);
-      return PunkInfo(stillPunks[id].oldNeighbor, stillPunks[id].newNeighbor, pos.x, pos.y, isMoving, totalGold, stillPunks[id].hp, stillPunks[id].evil, _randseedOfPunk[id], player, nickNameOf[player]);
+      return PunkInfo(stillPunks[id].oldNeighbor, stillPunks[id].newNeighbor, pos.x, pos.y, isMoving, totalGold, stillPunks[id].hp, stillPunks[id].evil, _randseedOfPunk[id], player, nickNameOf[player], block.number);
     }
 
     function getPunkOn(uint t, int x, int y) public view returns (uint) {
@@ -499,37 +462,11 @@ contract RogueLand {
       return golds;
     }
 
-    function getProductivity(int x, int y) public pure returns (uint) {
-      if (x == 0 && y == 0) {
-        return 100;
-      }
-      else if (x**2 <= 1  &&  y**2 <= 1) {
-        return 25;
-      }
-      else if (x**2 <= 9  &&  y**2 <= 9) {
-        return 10;
-      }
-      else if (x**2 <= 36  &&  y**2 <= 36) {
-        return 5;
-      }
-      else if (x**2 <= 100  &&  y**2 <= 100) {
-        return 3;
-      }
-      else if (x**2 <= 225  &&  y**2 <= 225) {
-        return 2;
-      }
-      else if (x**2 <= 576  &&  y**2 <= 576) {
-        return 1;
-      }
-      else {
-        return 0;
-      }
-    }
-
     function pendingGold(uint id) public view returns (uint) {
       uint time = getCurrentTime();
       if (stillPunks[id].showtime < time) {
-        uint productivity = getProductivity(stillPunks[id].x, stillPunks[id].y);
+        Building building = Building(buildingAddress);
+        uint productivity = building.getProductivity(stillPunks[id].x, stillPunks[id].y);
         return (time - stillPunks[id].showtime) * productivity * rewardsPerRound;
       }
       else {
@@ -537,33 +474,20 @@ contract RogueLand {
       }
     }
 
-
-    function _reward(address player, uint amount) private {
-        require(!gameOver, 'game over');
-        IERC20 squid = IERC20(squidAddress);
-        uint balance = squid.balanceOf(address(this));
-        if (balance <= amount) {
-          squid.transfer(player, balance);
-          gameOver = true;
-        }
-        else {
-          squid.transfer(player, amount);
-        }
-    }
-
     // 领取奖励
     function claimRewards() public {
-        uint id = punkOf[msg.sender];
-        require(id > 0, "Punk not exit!");
-        uint t = getCurrentTime();
-        Position memory pos = getPostion(id, t);
-        require(pos.x**2 == 625  ||  pos.y**2 == 625, 'go to border to claim your reward');
-        _reward(msg.sender, stillPunks[id].gold);
-        stillPunks[id].gold = 0;
-        // 自杀
-        _removeStillPunk(id);
-        punkOf[punkMaster[id]] = 0;
-        punkMaster[id] = address(0);
+      uint id = punkOf[msg.sender];
+      require(id > 0, "Punk not exit!");
+      uint t = getCurrentTime();
+      Position memory pos = getPostion(id, t);
+      Building building = Building(buildingAddress);
+      require(building.isHouse(pos.x, pos.y), 'go to house to claim your reward');
+      building.award(msg.sender, stillPunks[id].gold);
+      stillPunks[id].gold = 0;
+      // 自杀
+      _removeStillPunk(id);
+      punkOf[punkMaster[id]] = 0;
+      punkMaster[id] = address(0);
     }
 
 }
